@@ -2,36 +2,42 @@ const fetch = require('node-fetch');
 
 module.exports = async (req, res) => {
   try {
-    // Fetch all matches from streamed.su
+    // Fetch all matches
     const matchesResponse = await fetch('https://streamed.su/api/matches/all', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36' }
     });
     const matches = await matchesResponse.json();
 
-    // Filter matches from the last 24 hours
+    // Filter last 24 hours and take only 5 matches to avoid timeout
     const currentTime = Math.floor(Date.now() / 1000);
-    const liveMatches = matches.filter(m => m.date / 1000 >= currentTime - 86400);
+    const liveMatches = matches
+      .filter(m => m.date / 1000 >= currentTime - 86400)
+      .slice(0, 5); // Limit to 5 matches
 
-    // Build streams object with all sources per match
-    const streams = {};
-    for (const match of liveMatches) {
-      for (const source of match.sources) {
-        const url = `https://streamed-proxy-vercel.vercel.app/api/get_m3u8?source=${source.source}&id=${match.id}&streamNo=1`;
-        const m3u8Response = await fetch(url, {
+    // Fetch streams concurrently
+    const streamPromises = liveMatches.flatMap(match =>
+      match.sources.map(source =>
+        fetch(`https://streamed-proxy-vercel.vercel.app/api/get_m3u8?source=${source.source}&id=${match.id}&streamNo=1`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
             'Referer': 'https://streamed.su/'
-          }
-        });
-        const m3u8Data = await m3u8Response.json();
-        const m3u8Url = m3u8Data.m3u8_url || '';
-        streams[`${match.id}-${source.id}`] = {
-          matchId: match.id,
-          source: source.source,
-          m3u8_url: m3u8Url
-        };
-      }
-    }
+          },
+          timeout: 3000 // 3s timeout per request
+        })
+          .then(r => r.json())
+          .then(d => ({
+            key: `${match.id}-${source.id}`,
+            value: { matchId: match.id, source: source.source, m3u8_url: d.m3u8_url || '' }
+          }))
+          .catch(() => ({ key: `${match.id}-${source.id}`, value: { matchId: match.id, source: source.source, m3u8_url: '' } }))
+      )
+    );
+
+    const streamsArray = await Promise.all(streamPromises);
+    const streams = streamsArray.reduce((acc, { key, value }) => {
+      acc[key] = value;
+      return acc;
+    }, {});
 
     res.status(200).json(streams);
   } catch (error) {
