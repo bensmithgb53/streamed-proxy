@@ -1,46 +1,26 @@
 const fetch = require('node-fetch');
+const crypto = require('crypto'); // Node.js built-in
 
 module.exports = async (req, res) => {
-  try {
-    // Fetch all matches
-    const matchesResponse = await fetch('https://streamed.su/api/matches/all', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36' }
-    });
-    const matches = await matchesResponse.json();
+  const { source, id, streamNo } = req.body;
+  const response = await fetch(`https://streamed.su/api/matches/watch/${id}/${source}/${streamNo}`, {
+    method: 'GET', // Adjust if Streamed needs POST
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
+      'Referer': 'https://streamed.su/',
+      'Origin': 'https://streamed.su'
+    }
+  });
+  const enc = await response.text(); // Encrypted token
+  console.log('Encrypted:', enc);
 
-    // Filter last 24 hours and take only 5 matches to avoid timeout
-    const currentTime = Math.floor(Date.now() / 1000);
-    const liveMatches = matches
-      .filter(m => m.date / 1000 >= currentTime - 86400)
-      .slice(0, 5); // Limit to 5 matches
+  // Decryption (guessing AES from embedme.top style)
+  const key = 'some-secret-key'; // Need Streamed’s real key
+  const iv = 'some-iv-16bytes'; // Need real IV
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  let decrypted = decipher.update(enc, 'base64', 'utf8');
+  decrypted += decipher.final('utf8');
 
-    // Fetch streams concurrently
-    const streamPromises = liveMatches.flatMap(match =>
-      match.sources.map(source =>
-        fetch(`https://streamed-proxy-vercel.vercel.app/api/get_m3u8?source=${source.source}&id=${match.id}&streamNo=1`, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-            'Referer': 'https://streamed.su/'
-          },
-          timeout: 3000 // 3s timeout per request
-        })
-          .then(r => r.json())
-          .then(d => ({
-            key: `${match.id}-${source.id}`,
-            value: { matchId: match.id, source: source.source, m3u8_url: d.m3u8_url || '' }
-          }))
-          .catch(() => ({ key: `${match.id}-${source.id}`, value: { matchId: match.id, source: source.source, m3u8_url: '' } }))
-      )
-    );
-
-    const streamsArray = await Promise.all(streamPromises);
-    const streams = streamsArray.reduce((acc, { key, value }) => {
-      acc[key] = value;
-      return acc;
-    }, {});
-
-    res.status(200).json(streams);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch streams', details: error.message });
-  }
+  const m3u8Url = `https://rr.vipstreams.in${decrypted}`;
+  res.json({ m3u8_url: m3u8Url });
 };
